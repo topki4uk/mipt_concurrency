@@ -49,7 +49,7 @@
 
 Реализация context switch на ассемблере
 
-```text
+```asm
 ; context_switch(Context* from, Context* to)
 ; rdi = from, rsi = to  (System V AMD64 ABI)
 
