@@ -197,12 +197,6 @@ SFENCE — Store Fence: все stores до SFENCE видны до stores пос�
 MFENCE — Full Fence:  полный барьер — и loads и stores
 ```
 
-```text
-LFENCE — Load Fence:  все loads до LFENCE завершены до loads после
-SFENCE — Store Fence: все stores до SFENCE видны до stores после
-MFENCE — Full Fence:  полный барьер — и loads и stores
-```
-
 Что генерирует компилятор
 
 ```cpp
