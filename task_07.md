@@ -104,42 +104,37 @@ futex(uaddr, FUTEX_WAKE, n, NULL);  // разбудить потоки
 
 ```cpp
 #include <atomic>
-#include <linux/futex.h>
-#include <syscall.h>
+#include <cstdio>
+#include <thread>
+#include <vector>
+#include "futex.hpp"
 
-class Mutex {
+class Mutex2State {
 public:
     void lock() {
-        int expected = 0;
+        // Пытаемся сразу захватить mutex:
+        // 0 -> свободен, 1 -> занят
+        if (state_.exchange(1) == 0)
+            return;
 
-        // Fast path: пытаемся захватить (0 → 1)
-        if (state_.compare_exchange_strong(
-                expected, 1,
-                std::memory_order_acquire)) {
-            return; // захватили без syscall ✓
-        }
-
-        // Slow path: есть конкуренция
-        // Ставим состояние 2 (есть ожидающие)
-        // и уходим спать
-        while (state_.exchange(2, std::memory_order_acquire) != 0) {
-            // Спим ТОЛЬКО если state == 2 (ядро проверит это атомарно)
-            syscall(SYS_futex, &state_, FUTEX_WAIT, 2, nullptr);
-            // После пробуждения — снова пробуем захватить
-        }
+        // Если mutex уже занят, ждем пробуждения через futex
+        // и после пробуждения снова пытаемся захватить его.
+        do {
+            futex_wait(&state_, 1);
+        } while (state_.exchange(1) != 0);
     }
 
     void unlock() {
-        // Если state был 2 (есть ожидающие) — нужен WAKE
-        if (state_.fetch_sub(1, std::memory_order_release) != 1) {
-            // state был 2, значит кто-то ждёт
-            state_.store(0, std::memory_order_release);
-            syscall(SYS_futex, &state_, FUTEX_WAKE, 1, nullptr);
-        }
-        // Если state был 1 (никто не ждал) — просто стал 0, syscall не нужен
+        // Освобождаем mutex
+        state_.store(0); // между store и wake может успеть другой поток
+
+        // Будим один ожидающий поток
+        futex_wake(&state_, 1); // системный вызов делается всегда
     }
 
 private:
+    // 0 - mutex свободен
+    // 1 - mutex захвачен
     std::atomic<int> state_{0};
 };
 ```
