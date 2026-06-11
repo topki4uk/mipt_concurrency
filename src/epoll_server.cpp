@@ -1,94 +1,104 @@
-#include <sys/epoll.h>
+#include <iostream>
+#include <vector>
+#include <cstring>
+#include <unistd.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cerrno>
-#include <thread>
-#include <vector>
-#include <atomic>
+#include <sys/epoll.h>
 
-constexpr int NUM_WORKERS = 4;
-constexpr int MAX_EVENTS  = 64;
+constexpr int PORT = 8080;
+constexpr int BACKLOG = 10;  // Размер очереди ожидающих соединений
+constexpr size_t BUFFER_SIZE = 1024;
+constexpr int MAX_EVENTS = 64;  // Максимум событий за один epoll_wait
 
-void set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
+int main() {
+    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket < 0) {
+        std::cerr << "socket() failed\n";
+        return 1;
+    }
 
-void worker(int epfd) {
-    epoll_event events[MAX_EVENTS];
+    // 2. Разрешаем переиспользовать адрес и порт после перезапуска
+    int opt = 1;
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
+
+    if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
+        std::cerr << "bind() failed\n";
+        return 1;
+    }
+
+    if (listen(server_socket, BACKLOG) < 0) {
+        std::cerr << "listen() failed\n";
+        return 1;
+    }
+
+    std::cout << "Echo server listening on port " << PORT << "\n";
+
+    // Создаём epoll-инстанс
+    int epfd = epoll_create1(0);  // 0 = флаги не используются
+    if (epfd < 0) {
+        std::cerr << "epoll_create1() failed\n";
+        return 1;
+    }
+
+    // Добавляем серверный сокет в epoll, следим за событиями чтения (EPOLLIN)
+    epoll_event ev{};
+    ev.events = EPOLLIN;              // Интересны входящие данные / новые соединения
+    ev.data.fd = server_socket;       // Идентификатор для обработки события
+    epoll_ctl(epfd, EPOLL_CTL_ADD, server_socket, &ev);
+
+    std::vector<epoll_event> events(MAX_EVENTS);
 
     while (true) {
-        int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (n < 0) continue; // ← добавлено: EINTR при сигнале
+        // Ожидаем события бесконечно долго (таймаут -1)
+        int ready = epoll_wait(epfd, events.data(), MAX_EVENTS, -1);
+        if (ready < 0) {
+            std::cerr << "epoll_wait() failed\n";
+            return 1;
+        }
 
-        for (int i = 0; i < n; i++) {
-            int fd        = events[i].data.fd;
-            uint32_t ev   = events[i].events;
+        // Обрабатываем все готовые файловые дескрипторы
+        for (int i = 0; i < ready; ++i) {
+            int fd = events[i].data.fd;
 
-            if (ev & (EPOLLHUP | EPOLLERR)) {
-                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                close(fd);
-                continue;
-            }
+            if (fd == server_socket) {
+                int client_socket = accept(server_socket, nullptr, nullptr);
+                if (client_socket < 0) {
+                    std::cerr << "accept() failed\n";
+                    continue;
+                }
+                std::cout << "New client: " << client_socket << "\n";
 
-            if (ev & EPOLLIN) {
-                while (true) {
-                    char buf[4096];
-                    ssize_t bytes = read(fd, buf, sizeof(buf));
-
-                    if (bytes > 0) {
-                        write(fd, buf, bytes);
-                    } else if (bytes == 0) {
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                        close(fd);
-                        break;
-                    } else {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // ← добавлено EWOULDBLOCK
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                        close(fd);
-                        break;
-                    }
+                // Добавляем нового клиента в epoll (тоже следим за чтением)
+                epoll_event client_ev{};
+                client_ev.events = EPOLLIN;
+                client_ev.data.fd = client_socket;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, client_socket, &client_ev);
+            } else {
+                char buffer[BUFFER_SIZE];
+                ssize_t bytes = read(fd, buffer, sizeof(buffer));
+                
+                if (bytes > 0) {
+                    // Получили данные — отправляем их обратно (echo)
+                    write(fd, buffer, bytes);
+                } else {
+                    // bytes == 0: клиент закрыл соединение (orderly shutdown)
+                    // bytes < 0: ошибка чтения (в упрощённом коде тоже закрываем)
+                    std::cout << "Client disconnected: " << fd << "\n";
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);  // Удаляем из epoll
+                    close(fd);
                 }
             }
         }
     }
-}
 
-int main() {
-    std::vector<int> worker_epfds(NUM_WORKERS);
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        worker_epfds[i] = epoll_create1(0);
-    }
-
-    std::vector<std::thread> workers;
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        workers.emplace_back(worker, worker_epfds[i]);
-    }
-
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(8080);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    bind(server_fd, (sockaddr*)&addr, sizeof(addr));
-    listen(server_fd, 128);
-
-    std::atomic<int> next_worker{0};
-
-    while (true) {
-        int client_fd = accept4(server_fd, nullptr, nullptr, SOCK_NONBLOCK);
-        if (client_fd < 0) continue;
-
-        int w = next_worker.fetch_add(1) % NUM_WORKERS;
-
-        epoll_event ev{};                              // ← добавлено: {} — инициализация нулём
-        ev.events  = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
-        ev.data.fd = client_fd;
-        epoll_ctl(worker_epfds[w], EPOLL_CTL_ADD, client_fd, &ev);
-    }
+    close(server_socket);
+    close(epfd);
+    return 0;
 }

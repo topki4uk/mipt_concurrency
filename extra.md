@@ -2,6 +2,52 @@
 
 Здесь собрано то, что, возможно, было на лекциях, не вошло в темы экзамена, но может оказаться вопросом.
 
+### Реализация `OneShot`
+
+```cpp
+#include <functional>
+#include <mutex>
+
+class OneShot {
+public:
+    void Call() {
+        mutex_.lock();
+        if (!called_) {
+            called_ = true;
+            func_();
+        }
+        mutex_.unlock();
+    }
+
+    bool IsCalled() {
+        mutex_.lock();
+        bool result = called_;
+        mutex_.unlock();
+        return result;
+    }
+
+private:
+    std::mutex mutex_;
+    bool called_ = false;
+    std::function<void()> func_;
+};
+```
+
+```cpp
+auto os = std::make_shared<OneShot>(func);
+
+// запускаем T1 с захваченным shared_ptr
+std::thread t1([ptr=&os] {
+    while (!os->IsCalled()) {}
+});
+
+// T2 вызывает Call()
+os->Call();
+
+// T2 выходит из области видимости
+// os уничтожается -> вызывается деструктор OneShot -> вызывается деструктор Mutex
+```
+
 ### Реализация LockFree аллокатора для очереди и стека
 
 На самом деле оператор `new` вообще-то использует внутри себя мьютексы.

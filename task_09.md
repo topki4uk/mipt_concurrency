@@ -60,85 +60,41 @@ futex_wake(&flag, 1);
 
 ```cpp
 #include <atomic>
+#include <mutex>
 #include <linux/futex.h>
-#include <sys/syscall.h>
 
-class ConditionVariable {
-    // Счётчик поколений: каждый notify_all/notify_one его увеличивает
-    std::atomic<int> seq_{0};
-
-    static void futex_wait(std::atomic<int>* addr, int expected) {
-        syscall(SYS_futex, addr, FUTEX_WAIT, expected, nullptr);
-    }
-    static void futex_wake_all(std::atomic<int>* addr) {
-        syscall(SYS_futex, addr, FUTEX_WAKE, INT_MAX, nullptr);
-    }
-    static void futex_wake_one(std::atomic<int>* addr) {
-        syscall(SYS_futex, addr, FUTEX_WAKE, 1, nullptr);
-    }
-
+class CondVar {
 public:
-    // lock — уже захваченный мьютекс (передаётся владельцем)
-    template<typename Mutex, typename Predicate>
-    void wait(Mutex& mtx, Predicate pred) {
-        while (!pred()) {
-            // 1. Читаем seq_ ПОД мьютексом
-            int old = seq_.load(std::memory_order_relaxed);
-
-            // 2. Отпускаем мьютекс и ложимся спать атомарно
-            //    (производитель не сможет notify_one до шага 3)
-            mtx.unlock();
-
-            // 3. Спим ТОЛЬКО если seq_ не изменился
-            //    (если notify пришёл между unlock и wait — seq_ уже другой,
-            //     ядро вернёт EAGAIN, мы не заснем)
-            futex_wait(&seq_, old);
-
-            // 4. Проснулись — захватываем мьютекс обратно
-            mtx.lock();
-
-            // 5. Перепроверяем условие (цикл while)
-        }
-    }
-
-    // Простой wait без предиката (опасен — см. spurious wakeups)
-    template<typename Mutex>
-    void wait(Mutex& mtx) {
-        int old = seq_.load(std::memory_order_relaxed);
-        mtx.unlock();
-        futex_wait(&seq_, old);
-        mtx.lock();
+    void wait(std::unique_lock<std::mutex>& lock) {
+        // запоминаем текущее поколение
+        int expected = gen_counter_.load();
+        // освобождаем мьютекс
+        lock.unlock();
+        // если поколение не изменилось (то есть не было notify),
+        // то засыпаем
+        syscall(SYS_futex, &gen_counter_, FUTEX_WAIT, expected, nullptr, nullptr, 0);
+        // проснулись и снова захватили мьютекс
+        lock.lock();
     }
 
     void notify_one() {
-        // Увеличиваем счётчик — все текущие wait() увидят изменение
-        seq_.fetch_add(1, std::memory_order_relaxed);
-        futex_wake_one(&seq_);
+        // увеличиваем поколение
+        gen_counter_.fetch_add(1);
+        // будим один ожидающий поток
+        syscall(SYS_futex, &gen_counter_, FUTEX_WAKE, 1, nullptr, nullptr, 0);
     }
 
     void notify_all() {
-        seq_.fetch_add(1, std::memory_order_relaxed);
-        futex_wake_all(&seq_);
+        // увеличиваем поколение
+        gen_counter_.fetch_add(1);
+        // будим все ожидающие потоки
+        syscall(SYS_futex, &gen_counter_, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
     }
+
+private:
+    // счетчик поколений
+    std::atomic<int> gen_counter_{0};
 };
-```
-
-### Объяснение
-
-#### Почему счётчик защищает от гонки?
-
-```text
-БЕЗ счётчика поколений:       С счётчиком поколений:
-
-wait() запоминает...           wait() запоминает seq_=5
-  ...ничего конкретного          (под мьютексом)
-unlock()                       unlock()
-                               notify приходит:
-                                 seq_ становится 6
-futex_wait(addr, ???)          futex_wait(&seq_, 5)
-  addr изменился → EAGAIN        seq_(6) != 5 → EAGAIN
-  ← мы пропустили notify!        ← мы НЕ спим, идём
-                                   перепроверять условие ✓
 ```
 
 ### Проблема `spurious wakeups`
