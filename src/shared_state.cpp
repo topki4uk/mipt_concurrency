@@ -12,9 +12,8 @@ struct SharedState {
     std::optional<T>        value_;
     std::exception_ptr      exception_;
     bool                    ready_  = false;
-    bool                    future_retrieved_ = false; // get_future() можно вызвать только раз
+    bool                    future_retrieved_ = false;
 
-    // Производитель кладёт значение
     void set_value(T val) {
         std::unique_lock lock(mtx_);
         if (ready_) throw std::runtime_error("promise already satisfied");
@@ -23,7 +22,6 @@ struct SharedState {
         cv_.notify_all();
     }
 
-    // Производитель кладёт исключение
     void set_exception(std::exception_ptr ep) {
         std::unique_lock lock(mtx_);
         if (ready_) throw std::runtime_error("promise already satisfied");
@@ -32,7 +30,6 @@ struct SharedState {
         cv_.notify_all();
     }
 
-    // Потребитель ждёт и забирает результат
     T get() {
         std::unique_lock lock(mtx_);
         cv_.wait(lock, [this] { return ready_; });
@@ -43,7 +40,6 @@ struct SharedState {
         return std::move(*value_);
     }
 
-    // Неблокирующая проверка
     bool is_ready() {
         std::unique_lock lock(mtx_);
         return ready_;

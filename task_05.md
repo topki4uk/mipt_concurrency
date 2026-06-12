@@ -18,37 +18,36 @@
 template<typename T>
 class BlockingQueue {
 public:
-    // Добавить задачу (вызывается снаружи)
+    // Добавить задачу
     void push(T item) {
         {
             std::unique_lock lock(mtx_);
             queue_.push(std::move(item));
         }
-        cv_.notify_one(); // будим одного спящего рабочего
+        cv_.notify_one();
     }
 
-    // Взять задачу (вызывается рабочими потоками)
-    // Возвращает nullopt если очередь остановлена и пуста
+    // Взять задачу
     std::optional<T> pop() {
         std::unique_lock lock(mtx_);
         cv_.wait(lock, [this] {
             return !queue_.empty() || stopped_;
         });
 
-        if (queue_.empty()) return std::nullopt; // сигнал завершения
+        if (queue_.empty()) return std::nullopt;
 
         T item = std::move(queue_.front());
         queue_.pop();
         return item;
     }
 
-    // Остановить очередь — разбудить всех ждущих
+    // Остановить очередь
     void stop() {
         {
             std::unique_lock lock(mtx_);
             stopped_ = true;
         }
-        cv_.notify_all(); // будим ВСЕХ, чтобы все увидели флаг
+        cv_.notify_all();
     }
 
 private:
@@ -80,22 +79,21 @@ public:
         }
     }
 
-    // Добавить задачу в пул
     void submit(Task task) {
         queue_.push(std::move(task));
     }
 
     ~ThreadPool() {
-        queue_.stop();                        // сигнал завершения
-        for (auto& t : workers_) t.join();   // ждём всех рабочих
+        queue_.stop();
+        for (auto& t : workers_) t.join();
     }
 
 private:
     void worker_loop() {
         while (true) {
-            auto task = queue_.pop();   // блокируемся здесь до появления задачи
-            if (!task) break;           // nullopt = пора заканчивать
-            (*task)();                  // выполняем задачу
+            auto task = queue_.pop();
+            if (!task) break;
+            (*task)();
         }
     }
 
@@ -108,7 +106,7 @@ private:
 
 ```cpp
 int main() {
-    ThreadPool pool(4); // 4 рабочих потока
+    ThreadPool pool(4);
 
     for (int i = 0; i < 20; ++i) {
         pool.submit([i] {
@@ -116,7 +114,6 @@ int main() {
                       << " on thread " << std::this_thread::get_id() << "\n";
         });
     }
-    // Деструктор: stop() + join() — все задачи доделываются
 }
 ```
 

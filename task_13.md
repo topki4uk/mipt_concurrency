@@ -27,15 +27,13 @@ std::promise<int> p;
 std::future<int> f = p.get_future();
 
 std::thread producer([&p] {
-    int result = heavy_computation(); // долго считаем
-    p.set_value(result);              // публикуем результат
+    int result = heavy_computation();
+    p.set_value(result);
 });
 
-// Главный поток занимается другими делами...
 do_other_work();
 
-// Когда результат нужен — блокируемся
-int result = f.get(); // ждёт если ещё не готово
+int result = f.get();
 
 producer.join();
 ```
@@ -48,14 +46,13 @@ producer.join();
 try {
     p.set_value(compute());
 } catch (...) {
-    p.set_exception(std::current_exception()); // упаковываем исключение
+    p.set_exception(std::current_exception());
 }
 
 // В потребителе:
 try {
-    int x = f.get(); // бросит исключение если было set_exception
+    int x = f.get();
 } catch (const std::exception& e) {
-    // обрабатываем
 }
 ```
 
@@ -68,7 +65,6 @@ std::future<int> f = std::async(std::launch::async, [] {
     return heavy_computation();
 });
 
-// Потом:
 int result = f.get();
 ```
 
@@ -80,8 +76,6 @@ int result = f.get();
 которые вызываются по завершении операции. При цепочке зависимых операций это приводит к callback hell:
 
 ```cpp
-// Читаем файл → парсим → запрашиваем БД → обрабатываем → пишем ответ
-
 read_file("data.txt", [](std::string content) {
     parse(content, [](ParsedData data) {
         db_query(data.id, [](DbResult row) {
@@ -99,24 +93,9 @@ read_file("data.txt", [](std::string content) {
 // "Pyramid of doom" — код уходит вправо
 ```
 
-Проблемы callback hell:
-* Код читается снизу вверх и справа налево — нечитаемо
-
-* Обработка ошибок в каждом колбэке отдельно
-
-* Стек вызовов разорван — сложно отлаживать
-
-* Нельзя использовать `try/catch` через границы колбэков
-
-### Extra (:|||:)
-
-![alt text](images/callback_hell.png)
-
 ### Future Continuations: `.then()`
 
-Решение — продолжения (continuations): цепочка `.then()`, где каждый шаг получает результат предыдущего. 
-В стандартном C++ это появилось только в `std::experimental`, поэтому используют библиотеки (folly, boost) 
-или реализуют сами.
+Решение — продолжения (continuations): цепочка `.then()`, где каждый шаг получает результат предыдущего.
 
 **Идея:**
 
@@ -143,12 +122,11 @@ struct Future {
     auto then(F&& func) -> Future<std::invoke_result_t<F, T>> {
         using R = std::invoke_result_t<F, T>;
 
-        // Запускаем новый поток, который ждёт нас и применяет func
         auto shared = inner_;
         return Future<R>{
             std::async(std::launch::async, [shared, func] {
-                T value = shared.get();   // ждём предыдущего
-                return func(value);       // применяем следующий шаг
+                T value = shared.get();
+                return func(value);
             }).share()
         };
     }
@@ -161,17 +139,11 @@ struct Future {
 
 ```cpp
 Future<string>  f1 = async_read("file.txt");
-Future<Data>    f2 = f1.then(parse);           // f2 зависит от f1
-Future<Result>  f3 = f2.then(process);         // f3 зависит от f2
-Future<bool>    f4 = f3.then(write_response);  // f4 зависит от f3
+Future<Data>    f2 = f1.then(parse);
+Future<Result>  f3 = f2.then(process);
+Future<bool>    f4 = f3.then(write_response);
 
-f4.get(); // ждём конца всей цепочки
-```
-
-```text
-f1 ──► f2 ──► f3 ──► f4
-(read) (parse)(proc)(write)
-  последовательно, но без блокировки потоков
+f4.get();
 ```
 
 ### Combining: параллельные зависимости
@@ -185,18 +157,10 @@ Future<A> fa = async_fetch_user();
 Future<B> fb = async_fetch_orders();
 Future<C> fc = async_fetch_settings();
 
-// Запускаются параллельно, ждём все три
 when_all(fa, fb, fc)
     .then([](A a, B b, C c) {
         return build_response(a, b, c);
     });
-```
-
-```text
-fa ──────────────────┐
-fb ────────┐         ├──► then(build_response)
-fc ──────────────────┘
-  параллельно        when_all ждёт последнего
 ```
 
 #### `when_any` — ждём первого
@@ -205,27 +169,8 @@ fc ──────────────────┘
 Future<Result> f1 = query_server_1();
 Future<Result> f2 = query_server_2(); // дублирующий запрос
 
-// Берём тот, кто ответил быстрее
 when_any(f1, f2)
     .then([](Result r) {
-        use(r); // первый результат
+        use(r);
     });
-```
-
-#### Реализация `when_all`
-
-```cpp
-template<typename... Futures>
-auto when_all(Futures&&... futures) {
-    // Запускаем асинхронную задачу, которая ожидает завершения всех переданных future
-    return std::async(std::launch::async,
-        [](auto... fs) {
-            // .get() блокируется до завершения каждого future
-            // Все .get() выполняются параллельно (каждый в своём ожидании)
-            // Результаты собираются в кортеж (tuple)
-            return std::make_tuple(fs.get()...);
-        },
-        std::forward<Futures>(futures)...  // Передаём все future в лямбду по значению
-    );
-}
 ```

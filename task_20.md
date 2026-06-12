@@ -24,7 +24,7 @@ delete head                  // удаляем!
 
 ```text
 Плюсы:  O(1) память на поток, детерминированное удаление
-Минусы: дорогой scan при retire (O(N·P)), memory fence на каждое чтение
+Минусы: дорогой scan при retire (O(N·P))
 ```
 
 2. Epoch-Based Reclamation (EBR)
@@ -32,11 +32,6 @@ delete head                  // удаляем!
 Глобальный счётчик эпох. Поток при входе в критическую секцию фиксирует текущую эпоху. Узел удаляется только когда все потоки прошли через новую эпоху:
 
 ```text
-Эпоха 0: поток A удаляет узел → кладёт в retired[0]
-Эпоха 1: все потоки обновили local_epoch ≥ 1
-Эпоха 2: все потоки обновили local_epoch ≥ 2
-         → retired[0] точно никто не видит → можно delete
-
 Плюсы:  быстро, мало overhead'а на каждую операцию
 Минусы: узлы живут дольше, поток может заблокировать продвижение эпохи
 ```
@@ -93,7 +88,6 @@ shared_ptr<T> global_ptr;
 
 // Поток A:              // Поток B:
 global_ptr = new_ptr_a;  global_ptr = new_ptr_b;
-// DATA RACE! ptr_ и ctrl_block_ обновляются не атомарно вместе
 ```
 
 ### `std::atomic<std::shared_ptr<T>>`
@@ -103,22 +97,10 @@ C++20 специализация `atomic` для `shared_ptr`. Гарантир�
 ```cpp
 std::atomic<std::shared_ptr<T>> atomic_ptr;
 
-// Потокобезопасно:
-auto local = atomic_ptr.load();                    // атомарное чтение
-atomic_ptr.store(std::make_shared<T>(42));         // атомарная запись
-atomic_ptr.compare_exchange_strong(expected, new_val); // атомарный CAS
+auto local = atomic_ptr.load();
+atomic_ptr.store(std::make_shared<T>(42));
+atomic_ptr.compare_exchange_strong(expected, new_val);
 ```
-
-Что изменилось по сравнению с обычным `shared_ptr`
-
-|                        | `shared_ptr` | `atomic<shared_ptr>` |
-|------------------------|--------------|----------------------|
-| Инкремент счётчика     | Атомарный    | Атомарный            |
-| Чтение ptr+ctrl вместе | Не атомарно  | Атомарно             |
-| Запись ptr+ctrl вместе | Не атомарно  | Атомарно             |
-| CAS на сам указатель   | Невозможен   | Есть                 |
-| Конкурентное чтение    | Безопасно    | Безопасно            |
-| Конкурентная запись    | UB           | Безопасно            |
 
 ### Идея реализации: Split Reference Counting
 
@@ -132,38 +114,20 @@ struct atomic_shared_ptr {
 
     std::shared_ptr<T> load() {
         std::lock_guard lock(mtx_);
-        return ptr_; // атомарно копируем под мьютексом
+        return ptr_;
     }
 };
 ```
 
-Это работает, но не lock-free. Большинство реализаций (libstdc++, libc++) именно так и делают — через внутренний spinlock или мьютекс.
-
 Split Reference Counting — настоящая идея
 
 ```cpp
-// Указатель с внешним счётчиком
 struct CountedPtr {
-    int             external_count; // сколько потоков держат этот ptr
-    ControlBlock*   ctrl;           // блок управления shared_ptr
+    int             external_count;
+    ControlBlock*   ctrl;  // блок управления shared_ptr
 };
 
 std::atomic<CountedPtr> atomic_head;
-```
-
-```text
-Поток хочет load():
-  1. Атомарно читает CountedPtr И инкрементирует external_count
-     (одним atomic fetch_add на packed struct)
-  2. Теперь объект защищён: его не удалят пока external_count > 0
-  3. Читает данные
-  4. Декрементирует external_count
-     Если external_count + internal_count == 0 → delete
-
-Поток хочет store(new_ptr):
-  1. CAS на CountedPtr: заменяет весь пакет (ptr + счётчик) атомарно
-  2. У старого ptr: уменьшает internal_count на (external_count - 1)
-     (external_count потоков всё ещё держат старый ptr)
 ```
 
 ```cpp
@@ -175,12 +139,11 @@ struct AtomicSharedPtr {
         ControlBlock*  ctrl      = nullptr;
     };
 
-    std::atomic<CountedPtr> ptr_; // требует 128-bit CAS (CMPXCHG16B на x86)
+    std::atomic<CountedPtr> ptr_;
 
     std::shared_ptr<T> load() {
         CountedPtr old = ptr_.load(std::memory_order_acquire);
 
-        // Атомарно инкрементируем ext_count
         CountedPtr inc = old;
         do {
             inc = old;
@@ -188,10 +151,8 @@ struct AtomicSharedPtr {
         } while (!ptr_.compare_exchange_weak(old, inc,
                      std::memory_order_acquire));
 
-        // Теперь у нас есть "защита" — создаём shared_ptr
         std::shared_ptr<T> result(/* из ctrl */);
 
-        // Возвращаем ext_count обратно
         old.ctrl->release_external(inc.ext_count);
         return result;
     }

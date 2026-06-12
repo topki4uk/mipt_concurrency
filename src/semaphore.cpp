@@ -10,7 +10,6 @@ public:
 
     void acquire() {
         std::unique_lock lock(mtx_);
-        // Ждём, пока счётчик > 0 (защита от spurious wakeup)
         cv_.wait(lock, [this] { return count_ > 0; });
         --count_;
     }
@@ -20,7 +19,7 @@ public:
             std::unique_lock lock(mtx_);
             ++count_;
         }
-        cv_.notify_one(); // будим одного из ждущих
+        cv_.notify_one();
     }
 
 private:

@@ -8,9 +8,9 @@
 #include <sys/epoll.h>
 
 constexpr int PORT = 8080;
-constexpr int BACKLOG = 10;  // Размер очереди ожидающих соединений
+constexpr int BACKLOG = 10;
 constexpr size_t BUFFER_SIZE = 1024;
-constexpr int MAX_EVENTS = 64;  // Максимум событий за один epoll_wait
+constexpr int MAX_EVENTS = 64;
 
 int main() {
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -19,7 +19,6 @@ int main() {
         return 1;
     }
 
-    // 2. Разрешаем переиспользовать адрес и порт после перезапуска
     int opt = 1;
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -40,30 +39,26 @@ int main() {
 
     std::cout << "Echo server listening on port " << PORT << "\n";
 
-    // Создаём epoll-инстанс
-    int epfd = epoll_create1(0);  // 0 = флаги не используются
+    int epfd = epoll_create1(0);
     if (epfd < 0) {
         std::cerr << "epoll_create1() failed\n";
         return 1;
     }
 
-    // Добавляем серверный сокет в epoll, следим за событиями чтения (EPOLLIN)
     epoll_event ev{};
-    ev.events = EPOLLIN;              // Интересны входящие данные / новые соединения
-    ev.data.fd = server_socket;       // Идентификатор для обработки события
+    ev.events = EPOLLIN;
+    ev.data.fd = server_socket;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_socket, &ev);
 
     std::vector<epoll_event> events(MAX_EVENTS);
 
     while (true) {
-        // Ожидаем события бесконечно долго (таймаут -1)
         int ready = epoll_wait(epfd, events.data(), MAX_EVENTS, -1);
         if (ready < 0) {
             std::cerr << "epoll_wait() failed\n";
             return 1;
         }
 
-        // Обрабатываем все готовые файловые дескрипторы
         for (int i = 0; i < ready; ++i) {
             int fd = events[i].data.fd;
 
@@ -75,7 +70,6 @@ int main() {
                 }
                 std::cout << "New client: " << client_socket << "\n";
 
-                // Добавляем нового клиента в epoll (тоже следим за чтением)
                 epoll_event client_ev{};
                 client_ev.events = EPOLLIN;
                 client_ev.data.fd = client_socket;
@@ -85,13 +79,10 @@ int main() {
                 ssize_t bytes = read(fd, buffer, sizeof(buffer));
                 
                 if (bytes > 0) {
-                    // Получили данные — отправляем их обратно (echo)
                     write(fd, buffer, bytes);
                 } else {
-                    // bytes == 0: клиент закрыл соединение (orderly shutdown)
-                    // bytes < 0: ошибка чтения (в упрощённом коде тоже закрываем)
                     std::cout << "Client disconnected: " << fd << "\n";
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);  // Удаляем из epoll
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                     close(fd);
                 }
             }

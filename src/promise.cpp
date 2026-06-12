@@ -7,13 +7,11 @@ class Promise {
 public:
     Promise() : state_(std::make_shared<SharedState<T>>()) {}
 
-    // Некопируемый, перемещаемый
     Promise(const Promise&) = delete;
     Promise& operator=(const Promise&) = delete;
     Promise(Promise&&) = default;
     Promise& operator=(Promise&&) = default;
 
-    // Деструктор: если результат не установлен — broken promise
     ~Promise() {
         if (state_ && !value_set_) {
             state_->set_exception(

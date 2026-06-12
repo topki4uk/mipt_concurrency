@@ -6,19 +6,7 @@
 
 #### Stackful (с отдельным стеком)
 
-Это фактически **файберы**. Каждая корутина имеет собственный стек в куче. Приостановка = сохранение всего стека:
-
-```text
-Stackful корутина:
-
-  Стек корутины A (в куче, 64KB):
-  ┌─────────────┐
-  │  frame: foo │  ← вызвала bar()
-  │  frame: bar │  ← вызвала baz()
-  │  frame: baz │  ← здесь yield()
-  └─────────────┘
-  Стек сохранён целиком — можно yield() из любой глубины вызовов
-```
+Это фактически **файберы**. Каждая корутина имеет собственный стек в куче. Приостановка = сохранение всего стека.
 
 `yield()` можно вызвать из любой вложенной функции — весь стек сохраняется как есть.
 
@@ -49,7 +37,6 @@ Stackless корутина:
 | Свой стек                  | ✅ (64KB+)      | ✅ (64KB+)      | ❌ (только frame)      |
 | yield из вложенных функций | ✅              | ✅              | ❌                     |
 | Расход памяти              | Высокий        | Высокий        | Минимальный           |
-| Управление                 | Планировщик    | Планировщик    | Вызывающий код        |
 | Поддержка в стандарте      | Нет            | Нет            | C++20                 |
 | Context switch             | Asm (регистры) | Asm (регистры) | Обычный вызов функции |
 
@@ -61,12 +48,11 @@ Stackless корутина:
 Что делает компилятор
 
 ```cpp
-// Исходный код:
 Task my_coroutine() {
     int x = 10;
-    co_await some_awaitable();   // точка приостановки 1
+    co_await some_awaitable();
     int y = x + 20;
-    co_await another_awaitable(); // точка приостановки 2
+    co_await another_awaitable();
     co_return x + y;
 }
 ```
@@ -76,88 +62,50 @@ Task my_coroutine() {
 ```cpp
 // То во что компилятор превращает корутину (псевдокод):
 struct my_coroutine_frame {
-    // Локальные переменные (переживают приостановку)
     int x, y;
 
-    // Объект promise (управляет возвратом значений)
     Task::promise_type promise;
 
-    // Текущая точка приостановки
     int suspend_point = 0;
 
-    // Функция возобновления
     void resume() {
         switch (suspend_point) {
         case 0:
             x = 10;
-            // co_await some_awaitable():
             if (!some_awaitable().await_ready()) {
                 suspend_point = 1;
                 some_awaitable().await_suspend(this_handle);
-                return; // ← возвращаем управление вызывающему
+                return;
             }
         case 1:
             y = x + 20;
-            // co_await another_awaitable():
             if (!another_awaitable().await_ready()) {
                 suspend_point = 2;
                 another_awaitable().await_suspend(this_handle);
                 return;
             }
         case 2:
-            promise.return_value(x + y); // co_return
-            // уничтожить frame
+            promise.return_value(x + y);
         }
     }
 };
 ```
 
-Компилятор создаёт `promise_type`, вызывает `get_return_object()`, оборачивает тело корутины в каркас с `initial_suspend`, разворачивает каждый `co_await` в вызовы `await_ready`, `await_suspend`, `await_resume`, обрабатывает исключения через `unhandled_exception`, а в конце выполняет `final_suspend`. 
-
-Важный объект здесь — `std::coroutine_handle`, который является “ручкой” на кадр корутины и позволяет её возобновлять через `resume()`.
-
-Сам `coroutine frame` обычно выделяется динамически, по умолчанию через `operator new`, и хранит параметры функции, живые локальные переменные, `promise_type` и позицию, с которой надо продолжить выполнение. 
-
-Поэтому C++-корутины экономичнее потока по памяти, потому что им не нужен отдельный большой стек, но за это платят аллокацией кадра, управлением временем жизни и риском утечек, если не вызвать `destroy()` или неправильно настроить `final_suspend`.
-
-### Описание команд для корутины
-
-* `get_return_object()`: создаёт «объект‑руководитель» (return object), через который происходит взаимодействие с корутиной.
-
-*  `initial_suspend()`: возвращает `std::suspend_always` или `std::suspend_never`, указывая, будет ли корутина сразу после вызова сразу же приостановлена или начнёт выполнение тела до первой точки `co_await`.
-
-* `final_suspend()`: возвращает `std::suspend_always` или `std::suspend_never`, определяя, приостанавливается ли корутина однажды в финале или сразу разрушается.
-
-* `return_void()/return_value()`: вызываются при достижении `co_return`, и дают возможность получить возвращаемое значение. Компилятор генерирует при `co_return expr` вызов `promise.return_value(expr)` и затем делает goto `FinalSuspend`. 
-
-* `unhandled_exception()`: вызывается, если в теле корутины выбрасывается исключение и оно не перехвачено. Обычно здесь сохраняют `std::current_exception()` для передачи
-исключения внешнему коду.
-
 ### Оператор `co_await`
-
-`co_await expr` — это оператор ожидания, который работает через `awaitable/awaiter`-протокол. Компилятор получает `awaiter` из выражения, проверяет `await_ready()`, и если результат ещё не готов, вызывает `await_suspend(coroutine_handle)`, чтобы приостановить корутину и передать управление планировщику; при возобновлении вызывается `await_resume()`, который возвращает итоговое значение ожидания.
 
 `co_await expr` работает через концепцию Awaitable — объект должен иметь три метода:
 
 ```cpp
 struct MyAwaitable {
-    // Можно ли продолжить без приостановки?
-    // true  → не приостанавливаемся, сразу берём результат
-    // false → приостанавливаемся
     bool await_ready() { return false; }
 
-    // Вызывается при приостановке.
-    // handle — это ссылка на текущую корутину.
-    // Можно: запустить async-операцию, сохранить handle для resume позже
     void await_suspend(std::coroutine_handle<> handle) {
-        // Например: зарегистрировать в epoll и сохранить handle
         thread_pool.post([handle]() mutable {
             do_work();
-            handle.resume(); // разбудить корутину когда готово
+            handle.resume();
         });
     }
 
-    // Возвращает результат co_await — то что присваивается переменной
     int await_resume() { return result_; }
 
     int result_;
@@ -165,45 +113,23 @@ struct MyAwaitable {
 
 // Использование:
 Task example() {
-    int x = co_await MyAwaitable{};  // x = await_resume()
+    int x = co_await MyAwaitable{};
 }
-```
-
-#### Стандартные awaitables (extra)
-
-```cpp
-// Никогда не приостанавливается:
-struct std::suspend_never {
-    bool await_ready() { return true; }
-    void await_suspend(std::coroutine_handle<>) {}
-    void await_resume() {}
-};
-
-// Всегда приостанавливается:
-struct std::suspend_always {
-    bool await_ready() { return false; }
-    void await_suspend(std::coroutine_handle<>) {}
-    void await_resume() {}
-};
 ```
 
 ### Ключевое слово `co_return`
 
-`co_return` не “возвращает корутину”, а завершает её и передаёт результат в `promise.return_value(...)` или `promise.return_void()`. После этого корутина переходит к `final_suspend`, где либо сразу уничтожается, либо остаётся жить до явного `destroy()` — это зависит от того, что возвращает `final_suspend()`.
-
 `co_return` сигнализирует о завершении корутины и передаёт результат через `promise`:
 
 ```cpp
-// co_return value → вызывает promise.return_value(value)
 Task<int> compute() {
     int result = 42;
-    co_return result;       // promise.return_value(42)
+    co_return result;  // promise.return_value(42)
 }
 
-// co_return без значения → вызывает promise.return_void()
 Task<void> do_work() {
     do_something();
-    co_return;              // promise.return_void()
+    co_return;  // promise.return_void()
 }
 ```
 
@@ -216,7 +142,6 @@ Task<void> do_work() {
 ```cpp
 template<typename T>
 struct Task {
-    // Компилятор ищет Task::promise_type
     struct promise_type {
         T value_;
 
@@ -224,10 +149,8 @@ struct Task {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        // Приостановиться сразу при старте? (обычно нет)
         std::suspend_never  initial_suspend() { return {}; }
 
-        // Приостановиться при завершении? (обычно да — чтобы вызывающий мог забрать результат)
         std::suspend_always final_suspend() noexcept { return {}; }
 
         void return_value(T val) { value_ = std::move(val); }

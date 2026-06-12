@@ -2,7 +2,6 @@ template<typename T>
 class Future {
     std::shared_ptr<SharedState<T>> state_;
 
-    // Только Promise может создавать Future (через get_future)
     explicit Future(std::shared_ptr<SharedState<T>> state)
         : state_(std::move(state)) {}
 
@@ -11,16 +10,14 @@ class Future {
 public:
     Future() = default;
 
-    // Некопируемый — владение результатом уникально
     Future(const Future&) = delete;
     Future& operator=(const Future&) = delete;
     Future(Future&&) = default;
     Future& operator=(Future&&) = default;
 
-    // Блокирующее получение результата (можно вызвать только раз)
     T get() {
         if (!state_) throw std::runtime_error("no shared state");
-        auto state = std::move(state_); // после get() future невалиден
+        auto state = std::move(state_);
         return state->get();
     }
 
@@ -31,7 +28,6 @@ public:
         return state_->is_ready();
     }
 
-    // Ждём без получения результата
     void wait() const {
         state_->get(); // упрощённо
     }

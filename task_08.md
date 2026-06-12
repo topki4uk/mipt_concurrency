@@ -5,10 +5,9 @@
 С двумя состояниями (0 = свободен, 1 = захвачен) `unlock()` не знает, есть ли спящие потоки. Приходится всегда звать `futex_wake` — даже когда никто не ждёт:
 
 ```cpp
-// Два состояния — unlock всегда делает syscall
 void unlock() {
     state_.store(0, release);
-    futex_wake(&state_, 1); // ← лишний syscall, даже если никто не спит
+    futex_wake(&state_, 1); // лишний syscall
 }
 ```
 
@@ -21,16 +20,11 @@ void unlock() {
 OneShot<int> result;
 
 // Поток-производитель
-result.set(42);  // сигнализирует всем ждущим
+result.set(42);
 
 // Поток-потребитель
-int v = result.get();  // блокируется до set()
+int v = result.get();
 ```
-
-Критическая ситуация: что происходит после `set()`? Потребитель проснулся, получил значение, и может немедленно уничтожить объект 
-`result` (например, он на стеке). Производитель при этом ещё выполняет код внутри `set()` — и обращается к памяти уже уничтоженного объекта:
-
-С двумя состояниями нет способа узнать: есть ли ещё кто-то внутри `set()`, прежде чем разрушать объект. Третье состояние решает оба этих вопроса.
 
 ### Попытка со счётчиком ожидающих и почему она ломается
 
@@ -65,9 +59,6 @@ static constexpr int LOCKED   = 1; // захвачен, нет ожидающи�
 static constexpr int SLEEPING = 2; // захвачен, есть спящие потоки
 ```
 
-Инвариант: `SLEEPING` означает — «когда `unlock()` освободит мьютекс, обязательно нужно позвать `futex_wake`». 
-Если состояние `LOCKED` — никто не спит, `futex_wake` не нужен.
-
 ### Итоговая реализация
 
 ```cpp
@@ -93,72 +84,27 @@ class Mutex {
 
 public:
     void lock() {
-        // Fast path: FREE → LOCKED (без syscall)
         int expected = FREE;
         if (state_.compare_exchange_strong(
                 expected, LOCKED,
                 std::memory_order_acquire,
                 std::memory_order_relaxed)) {
-            return; // ✓ захватили без конкуренции
+            return;
         }
 
-        // Slow path: есть конкуренция
-        // Переводим в SLEEPING и уходим спать
-        // (даже если до нас уже SLEEPING — это нормально)
         while (state_.exchange(SLEEPING,
                                std::memory_order_acquire) != FREE) {
-            // Спим только если состояние действительно SLEEPING
-            // (ядро атомарно проверит это)
             futex_wait(&state_, SLEEPING);
         }
-        // Вышли из цикла: state был FREE, мы его забрали (exchange вернул FREE)
     }
 
     void unlock() {
-        // Атомарно уменьшаем: LOCKED(1)→FREE(0) или SLEEPING(2)→?(1)
         int prev = state_.fetch_sub(1, std::memory_order_release);
 
         if (prev == SLEEPING) {
-            // Были спящие потоки — нужно разбудить одного
-            // Сначала явно ставим FREE (fetch_sub поставил 1, а не 0)
             state_.store(FREE, std::memory_order_release);
-            futex_wake(&state_, 1); // syscall только здесь
+            futex_wake(&state_, 1);
         }
-        // Если prev == LOCKED — просто стали FREE, никто не ждёт → 0 syscall
     }
 };
-```
-
-### Разбор работы 
-
-#### `lock()`
-
-```text
-Нет конкуренции:
-  CAS(FREE→LOCKED) ✓ → return
-  [0 syscalls, 1 атомарная операция]
-
-Конкуренция, но мьютекс освобождается быстро:
-  exchange(SLEEPING) → вернул LOCKED или FREE?
-  ├─ FREE → вышли из while, захватили (не пошли спать)
-  └─ LOCKED/SLEEPING → идём в futex_wait
-
-В futex_wait:
-  Ядро проверяет: state == SLEEPING?
-  ├─ нет (кто-то уже сделал unlock) → сразу вернуться (EAGAIN)
-  └─ да → усыпить поток
-```
-
-#### `unlock()`
-
-```text
-state == LOCKED (1):            state == SLEEPING (2):
-
-fetch_sub(1) → state = 0        fetch_sub(1) → state = 1
-prev = 1 = LOCKED               prev = 2 = SLEEPING
-
-prev != SLEEPING →              prev == SLEEPING →
-  ничего не делаем                store(FREE) → state = 0
-  [0 syscalls] ✓                  futex_wake(1)
-                                  [1 syscall — только при конкуренции]
 ```

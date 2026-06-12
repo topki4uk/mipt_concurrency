@@ -15,17 +15,7 @@
   Создание: ~10мкс               Создание: ~1мкс
 ```
 
-Файберы — кооперативные: сами решают когда отдать управление через `yield()`. 
-Ядро видит один поток, внутри которого файберы переключаются сами.
-
 ### Идея context switch
-
-Чтобы переключиться с файбера A на файбер B, нужно:
-* Сохранить состояние A (регистры, указатель стека, указатель инструкций)
-
-* Восстановить состояние B
-
-* Прыгнуть на инструкцию, где B был прерван
 
 Состояние файбера — это его контекст (context):
 
@@ -105,18 +95,16 @@ struct Fiber {
     Fiber(size_t stack_size, void (*func)())
         : stack_(stack_size)
     {
-        getcontext(&ctx_);                    // инициализация
+        getcontext(&ctx_);
         ctx_.uc_stack.ss_sp   = stack_.data();
         ctx_.uc_stack.ss_size = stack_.size();
-        ctx_.uc_link          = nullptr;      // куда вернуться по завершении
-        makecontext(&ctx_, func, 0);          // связать с функцией
+        ctx_.uc_link = nullptr;
+        makecontext(&ctx_, func, 0);
     }
 };
 
-// Переключение: сохранить текущий → восстановить следующий
 void switch_to(Fiber* from, Fiber* to) {
     swapcontext(&from->ctx_, &to->ctx_);
-    // ← сюда вернёмся когда кто-то переключится обратно на from
 }
 ```
 
@@ -129,9 +117,9 @@ void switch_to(Fiber* from, Fiber* to) {
 #include <functional>
 
 class Scheduler {
-    std::queue<Fiber*> ready_queue_;  // очередь готовых файберов
-    Fiber*             current_ = nullptr;
-    Fiber              main_fiber_;   // контекст «основного» потока
+    std::queue<Fiber*> ready_queue_;  
+    Fiber* current_ = nullptr;
+    Fiber main_fiber_;
 
 public:
     void spawn(std::function<void()> func) {
@@ -139,31 +127,26 @@ public:
         ready_queue_.push(fiber);
     }
 
-    // Запустить следующий файбер из очереди
     void run() {
         while (!ready_queue_.empty()) {
             Fiber* next = ready_queue_.front();
             ready_queue_.pop();
 
             current_ = next;
-            switch_to(&main_fiber_, next); // передаём управление
-            // ← вернулись сюда когда next вызвал yield или завершился
+            switch_to(&main_fiber_, next);
         }
     }
 
-    // Вызывается из файбера: отдать управление планировщику
     void yield() {
         Fiber* me = current_;
-        ready_queue_.push(me);        // ставим себя обратно в очередь
+        ready_queue_.push(me);
         current_ = nullptr;
-        switch_to(me, &main_fiber_);  // возвращаемся в run()
-        // ← сюда вернёмся когда планировщик снова выберет нас
+        switch_to(me, &main_fiber_);
     }
 
-    static Scheduler* current_scheduler; // thread_local для доступа из файбера
+    static Scheduler* current_scheduler;
 };
 
-// Глобальная функция yield (вызывается из кода файбера)
 void yield() {
     Scheduler::current_scheduler->yield();
 }
@@ -182,9 +165,9 @@ void yield() {
 
 Есть несколько способов для передачи управления:
 
-1. `yield` - переводит `Running` в `Runnable` и передает управление шедулеру (когда завершил задачу)
-2. `suspend` - переводит `Running` в `Suspend` и передает управление шедулеру (когда ждет событие)
-3. `exit` - переводит `Running` в `Dead` и передает управление шедулеру (если полностью завершил работу)
+1. `yield`
+2. `suspend`
+3. `exit`
 
 ### Подробнее про `Suspend`
 
@@ -195,34 +178,19 @@ void yield() {
 * `Park()` - принять файбер на ожидание
 * `Unpark()` - разбуть спящий и поставить его в `Runnable`
 
-Если файбер заснет на Awaitable:
-1. Файбер перейдет в `Suspend`
-2. `Awaitable` запомнит его
-3. Файбер отдаст управение шедулеру
-4. Тот его не будет будить
-
-Когда задача с Awaitable завершится:
-1. `Awaitable` вызывает `Unpark()`
-2. Файбер переходит в `Runnable`
-3. `Awaitable` указывает шедулеру на файбер
-4. Шедулер добавляет файбер в очередь и запускает
-
 ### Асинхронный I/O + yield
 
 Настоящая польза файберов — скрыть асинхронность за синхронным интерфейсом:
 
 ```cpp
-// Выглядит как синхронный код:
-std::string data = async_read(fd);   // внутри: регистрирует в epoll + yield()
-process(data);                       // выполняется когда данные готовы
+std::string data = async_read(fd);
+process(data);
 
 // Внутри async_read:
 std::string async_read(int fd) {
-    // Регистрируем fd в epoll
     scheduler->register_io(fd, current_fiber);
-    yield();  // отдаём управление — другие файберы работают пока ждём I/O
+    yield();
 
-    // Планировщик разбудит нас когда epoll сообщит о готовности fd
     char buf[4096];
     read(fd, buf, sizeof(buf));
     return std::string(buf);
@@ -235,24 +203,19 @@ std::string async_read(int fd) {
 В контексте файберов и планировщика это особенно полезно: можно проверить поведение при сбоях которые в реальности редки.
 
 ```cpp
-// В production: просто вызов функции
-// В тестах: может бросить исключение или вернуть ошибку
-
 class FaultInjector {
     struct Fault {
-        int   countdown;  // через сколько вызовов сработать
+        int   countdown;
         bool  active;
     };
 
     std::unordered_map<std::string, Fault> faults_;
 
 public:
-    // Зарегистрировать ошибку: через N вызовов точки "name" — сбой
     void inject(const std::string& name, int after_n_calls) {
         faults_[name] = {after_n_calls, true};
     }
 
-    // Вызывается в "точке внедрения"
     void check(const std::string& name) {
         auto it = faults_.find(name);
         if (it == faults_.end()) return;
@@ -265,7 +228,7 @@ public:
     }
 };
 
-FaultInjector g_faults; // глобальный или thread_local
+FaultInjector g_faults;
 ```
 
 Внедрение точек в код
@@ -309,7 +272,7 @@ void test_read_failure() {
                 async_read(some_fd);
             }
         } catch (const std::runtime_error& e) {
-            error_handled = true; // убеждаемся что ошибка поймана
+            error_handled = true;
         }
     });
 
@@ -321,14 +284,6 @@ void test_read_failure() {
 
 1. Поиск скрытых состояний гонки (`Race condition`)
 
-    Искусственный `yield()` позволяет смоделировать ситуацию, где данные могут быть изменены файбером в самый неожиданный момент.
-
 2. Симуляция реальных `I/O` операций
 
-    При помощи `Fault injection` можно моделировать задержки как в реальном использовании, будто бы имеется настоящая сетевая задержка.
-
 3. Моделирование гейзенбагов
-
-    Гейзенбаги - это такие ошибки, которые очень сложно отлаживать, потому что они вызваны случайностью работы ОС. 
-
-    При помощи файберов можно достичь детерменированного тестирования при помощи сидов, что делает ошибки воспроизводимыми. 
