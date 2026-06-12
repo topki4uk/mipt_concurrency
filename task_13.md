@@ -108,10 +108,6 @@ read_file("data.txt", [](std::string content) {
 
 * Нельзя использовать `try/catch` через границы колбэков
 
-### Extra (:|||:)
-
-![alt text](images/callback_hell.png)
-
 ### Future Continuations: `.then()`
 
 Решение — продолжения (continuations): цепочка `.then()`, где каждый шаг получает результат предыдущего. 
